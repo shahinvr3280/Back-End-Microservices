@@ -1,0 +1,67 @@
+package main
+
+import (
+    "context"
+    "net/http"
+
+    "github.com/aws/aws-sdk-go-v2/service/timestreamwrite"
+    "github.com/aws/aws-sdk-go-v2/service/timestreamwrite/types"
+    "github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+    tsClient *timestreamwrite.Client
+    db       string
+    table    string
+}
+
+func NewHandler(c *timestreamwrite.Client, db, table string) *Handler {
+    return &Handler{tsClient: c, db: db, table: table}
+}
+
+type IngestPayload struct {
+    SessionID string                 `json:"sessionId" binding:"required"`
+    Timestamp float64                `json:"timestamp" binding:"required"`
+    Type      string                 `json:"type" binding:"required"`
+    Data      map[string]interface{} `json:"data" binding:"required"`
+}
+
+func (h *Handler) Ingest(c *gin.Context) {
+    var p IngestPayload
+    if err := c.ShouldBindJSON(&p); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+    // Prepare record
+    rec := types.Record{
+        Dimensions: []types.Dimension{{Name: "sessionId", Value: p.SessionID}},
+        MeasureName: p.Type,
+        MeasureValueType: types.MeasureValueTypeDouble,
+        MeasureValue:     formatMeasureValue(p.Data),
+        Time:             awsTimeString(p.Timestamp),
+    }
+    // Write
+    _, err := h.tsClient.WriteRecords(context.TODO(), &timestreamwrite.WriteRecordsInput{
+        DatabaseName: &h.db,
+        TableName:    &h.table,
+        Records:      []types.Record{rec},
+    })
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+    c.Status(http.StatusOK)
+}
+
+func formatMeasureValue(data map[string]interface{}) string {
+    // For simplicity, flatten to JSON string
+    b, _ := json.Marshal(data)
+    return string(b)
+}
+
+func awsTimeString(ts float64) *string {
+    // Timestream expects epoch in milliseconds
+    ms := int64(ts * 1000)
+    s := fmt.Sprintf("%d", ms)
+    return &s
+}
