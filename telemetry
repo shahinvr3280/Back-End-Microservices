@@ -1,0 +1,36 @@
+package main
+
+import (
+    "context"
+    "log"
+    "net/http"
+    "os"
+
+    "github.com/gin-gonic/gin"
+    "github.com/aws/aws-sdk-go-v2/config"
+    "github.com/aws/aws-sdk-go-v2/service/timestreamwrite"
+)
+
+func main() {
+    // Load AWS config
+    awsCfg, err := config.LoadDefaultConfig(context.TODO())
+    if err != nil {
+        log.Fatalf("unable to load AWS SDK config, %v", err)
+    }
+    client := timestreamwrite.NewFromConfig(awsCfg)
+
+    // Read env
+    db := os.Getenv("TIMESTREAM_DATABASE")
+    table := os.Getenv("TIMESTREAM_TABLE")
+
+    r := gin.Default()
+    h := NewHandler(client, db, table)
+    r.POST("/ingest", h.Ingest)
+
+    port := os.Getenv("PORT")
+    if port == "" {
+        port = "9090"
+    }
+    log.Printf("Starting telemetry-api on :%s", port)
+    r.Run("0.0.0.0:" + port)
+}
