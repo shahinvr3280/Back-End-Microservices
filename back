@@ -1,0 +1,9 @@
+cd telemetry-api
+go build -o telemetry-api
+./telemetry-api
+POST /ingestRequest JSON: {"sessionId":"uuid","timestamp":123.45,"type":"headpose","data":{"x":0.1,"y":1.2,"z":-0.3}}Valid types: headpose, ecg.Responds 200 on success.
+cd analytics-service
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8000
