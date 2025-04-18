@@ -1,0 +1,63 @@
+import os
+import json
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import asyncpg
+import aiobotocore.session
+from datetime import datetime
+from dotenv import load_dotenv
+
+env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+load_dotenv(env_path)
+
+app = FastAPI()
+
+# Database connection pool
+pg_pool = None
+
+def get_pg_dsn():
+    return f"postgresql://{os.getenv('PG_USER')}:{os.getenv('PG_PASSWORD')}@{os.getenv('PG_HOST')}:{os.getenv('PG_PORT')}/{os.getenv('PG_DATABASE')}"
+
+# Timestream session
+aws_region = os.getenv('AWS_REGION')
+session = aiobotocore.session.get_session()
+
+@app.on_event("startup")
+async def startup():
+    global pg_pool
+    pg_pool = await asyncpg.create_pool(dsn=get_pg_dsn(), min_size=1, max_size=10)
+
+@app.on_event("shutdown")
+async def shutdown():
+    await pg_pool.close()
+
+class HRVResponse(BaseModel):
+    sessionId: str
+    sdnn: float
+
+@app.get("/sessions/{session_id}/hrv", response_model=HRVResponse)
+async def compute_hrv(session_id: str):
+    # Fetch ECG JSON blobs from Timestream
+    async with session.create_client('timestream-query', region_name=aws_region) as client:
+        query = f"SELECT measure_value::varchar FROM {os.getenv('TIMESTREAM_DATABASE')}.{os.getenv('TIMESTREAM_TABLE')} WHERE sessionId='{session_id}' AND measure_name='ecg'"
+        resp = await client.query(QueryString=query)
+        rr = []
+        for row in resp['Rows']:
+            data = json.loads(row['Data'][0]['ScalarValue'])
+            rr.extend(data.get('rrIntervals', []))
+    if len(rr) < 2:
+        raise HTTPException(status_code=404, detail="Not enough data")
+    mean_rr = sum(rr)/len(rr)
+    sdnn = (sum((x-mean_rr)**2 for x in rr)/(len(rr)-1))**0.5
+    return {"sessionId": session_id, "sdnn": sdnn}
+
+@app.get("/sessions/{session_id}/summary")
+async def session_summary(session_id: str):
+    # Example combining Postgres and Timestream data
+    async with pg_pool.acquire() as conn:
+        rec = await conn.fetchrow("SELECT start_time, end_time FROM sessions WHERE id=$1", session_id)
+    if not rec:
+        raise HTTPException(404, "Session not found")
+    duration = (rec['end_time'] - rec['start_time']).total_seconds()
+    hrv = (await compute_hrv(session_id))['sdnn']
+    return {"sessionId": session_id, "duration": duration, "hrv": hrv}
